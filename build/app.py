@@ -1,26 +1,27 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 import tempfile
 import subprocess
 import os
+from pathlib import Path
 
 app = FastAPI()
 
 @app.post("/convert")
 async def convert_audio(file: UploadFile = File(...)):
-    # Einfacher Check
-    if not file.filename.lower().endswith(".m4a"):
-        raise HTTPException(status_code=400, detail="Nur .m4a wird akzeptiert")
+    # Dateiname + Endung ermitteln (zur Not Default)
+    original_name = file.filename or "audio.m4a"
+    suffix = Path(original_name).suffix or ".m4a"
 
-    # Temporäre Dateien
+    # Kein harter Check mehr auf ".m4a" – ffmpeg kommt mit den Bytes klar,
+    # egal wie die Datei heißt.
     with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, "input.m4a")
+        input_path = os.path.join(tmpdir, f"input{suffix}")
         output_path = os.path.join(tmpdir, "output.mp3")
 
         # Upload speichern
         with open(input_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+            f.write(await file.read())
 
         # ffmpeg ausführen
         cmd = [
@@ -30,24 +31,22 @@ async def convert_audio(file: UploadFile = File(...)):
             "-qscale:a", "2",
             output_path,
         ]
-
         process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if process.returncode != 0:
-            raise HTTPException(status_code=500, detail="ffmpeg Fehler: " + process.stderr.decode(errors="ignore"))
 
-        # MP3 zurückgeben
-        def iterfile():
-            with open(output_path, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    yield chunk
+        if process.returncode != 0 or not os.path.exists(output_path):
+            # ffmpeg ist gescheitert – Log zurückgeben
+            err = process.stderr.decode(errors="ignore")
+            raise HTTPException(status_code=500, detail=f"ffmpeg error: {err}")
 
-        return StreamingResponse(
-            iterfile(),
-            media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": f'attachment; filename="{os.path.splitext(file.filename)[0]}.mp3"'
-            }
-        )
+        # MP3 einlesen, solange der Temp-Ordner noch existiert
+        with open(output_path, "rb") as f:
+            data = f.read()
+
+    # Hier ist der Temp-Ordner schon weg – aber "data" liegt im Speicher 👍
+    return Response(
+        content=data,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": f'attachment; filename="{Path(original_name).stem}.mp3"'
+        }
+    )
